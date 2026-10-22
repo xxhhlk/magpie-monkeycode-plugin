@@ -1,0 +1,22 @@
+{
+  "name": "opencode-monkeycode-auth",
+  "version": "0.1.0",
+  "description": "OpenCode & Magpie provider plugin for MonkeyCode (monkeycode-ai.com)",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "monkeycode"
+  ],
+  "license": "MIT",
+  "magpie": {
+    "maxConcurrency": 4
+  }
+}
