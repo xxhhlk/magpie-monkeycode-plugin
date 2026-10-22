@@ -6,10 +6,16 @@
 ## 安装
 
 ```sh
-magpie plugin add X:\github-repos\magpie-monkeycode-plugin
+magpie plugin add xxhhlk/magpie-monkeycode-plugin
 magpie plugin login monkeycode
 magpie provider test monkeycode
 magpie models | grep monkeycode
+```
+
+开发时也可以就地加载本地目录：
+
+```sh
+magpie plugin add ./magpie-monkeycode-plugin
 ```
 
 也可以在 magpie 窗口的「插件 › 发现 › 从文件夹添加」里选这个目录。插件就地加载，不装任何依赖。
