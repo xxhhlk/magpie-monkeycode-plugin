@@ -43,8 +43,11 @@ const MAX_OUTPUT = 32000
 const CHANNEL_PREFIX = "monkeycode/"
 const TIERS = ["basic", "pro", "ultra"]
 
-// Hosted models as the official client lists them. The vendor has no model
-// catalogue endpoint (GET /models answers 405), so this table is the list.
+// Hosted models as the official client lists them. The proxy domain has no
+// model catalogue endpoint (GET /models answers 405); the console does
+// (/api/v1/users/models, cookie-authenticated) but it also lists entries
+// flagged is_hidden, which the client hides too. This table equals the
+// console's visible set (verified 2026-10-23 against the live catalogue).
 const MODEL_IDS = [
   "basic/deepseek-flash",
   "basic/glm-5.3-flash",
