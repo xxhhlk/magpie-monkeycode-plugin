@@ -110,6 +110,15 @@ const MODEL_LABELS = {
 
 const TIER_LABELS = { basic: "Basic", pro: "Pro", ultra: "Ultra" }
 
+// MonkeyCode has no "multiplier" field. Its console lists a per-model
+// `input_price` on /api/v1/users/models/available, and what it actually
+// charges tracks that price exactly (measured 2026-10-23: 197-token requests
+// cost 4 / 8 / 15 / 23 / 30 credits at prices 100 / 200 / 400 / 600 / 800).
+// The basic tier's list price is the natural 1x, so a model's credit rate is
+// its price over that one.
+const RATE_BASE = 200
+const RATE_TTL_MS = 10 * 60 * 1000
+
 // ---- helpers ----------------------------------------------------------------
 
 const baseURL = () => String(process.env.MONKEYCODE_API_BASE || DEFAULT_BASE).replace(/\/+$/, "")
@@ -146,7 +155,7 @@ function isResponsesModel(id) {
   return RESPONSES_MODELS.has(bareModelID(id))
 }
 
-function modelEntry(id) {
+function modelEntry(id, rate = 0) {
   const entry = {
     name: labelOf(id),
     id: upstreamModelID(id),
@@ -154,14 +163,81 @@ function modelEntry(id) {
     tool_call: true,
     reasoning: true,
   }
+  // magpie shows the credit rate beside the model; OpenCode ignores it.
+  if (rate > 0) entry.rate = rate
   // A model on the Responses endpoint needs a different API shape than the
   // provider's default Anthropic one.
   if (isResponsesModel(id)) entry.provider = { npm: RESPONSES_NPM }
   return entry
 }
 
-function modelsConfig() {
-  return Object.fromEntries(MODEL_IDS.map((id) => [id, modelEntry(id)]))
+function modelsConfig(rates) {
+  return Object.fromEntries(MODEL_IDS.map((id) => [id, modelEntry(id, rates?.get(id) ?? 0)]))
+}
+
+// fetchRates reads the console's per-model input price and turns it into the
+// credit rate magpie displays. The console lists hosted models under their
+// upstream names (with the `monkeycode-` prefix), and only the basic tier and
+// the bare names carry a price, so anything missing keeps no rate rather than
+// a made-up one.
+async function fetchRates(cookie) {
+  if (!cookie) return { rates: new Map(), why: "no console cookie" }
+  const res = await fetch(`${consoleURL()}/api/v1/users/models/available`, {
+    headers: { Cookie: `monkeycode_ai_session=${cookie}`, Accept: "application/json", "User-Agent": AGENT_UA },
+    signal: AbortSignal.timeout(10000),
+  })
+  const { payload } = await readJSON(res)
+  if (!res.ok || Number(payload?.code) !== 0 || !Array.isArray(payload?.data)) {
+    return { rates: new Map(), why: `HTTP ${res.status}` }
+  }
+  const rates = new Map()
+  for (const row of payload.data) {
+    const name = bareModelID(row?.name ?? row?.model ?? "")
+    const price = Number(row?.input_price)
+    if (!name || !Number.isFinite(price) || price <= 0) continue
+    rates.set(name, price / RATE_BASE)
+  }
+  return { rates, why: "" }
+}
+
+// rateCache holds the last good answer per console cookie, so a listing keeps
+// its rates when the console is briefly unreachable.
+const rateCache = new Map()
+
+function rateCacheKey(cookie) {
+  return cookie ? cookie.slice(-12) : ""
+}
+
+// ratesFor returns the console's rates, reusing the last good read for a
+// while so the model list stays stable when the console is slow.
+async function ratesFor(cookie) {
+  const key = rateCacheKey(cookie)
+  const hit = key ? rateCache.get(key) : null
+  if (hit && Date.now() - hit.at < RATE_TTL_MS) return hit.rates
+  try {
+    const { rates, why } = await fetchRates(cookie)
+    if (rates.size && key) {
+      rateCache.set(key, { rates, at: Date.now() })
+      return rates
+    }
+    if (why) return hit?.rates ?? new Map()
+    return rates
+  } catch {
+    return hit?.rates ?? new Map()
+  }
+}
+
+// withRates puts the credit rate on the models magpie was about to show. A
+// model the console prices nothing for keeps no rate, so magpie shows no
+// badge instead of a wrong number.
+function withRates(models, rates) {
+  if (!rates?.size) return models
+  const out = {}
+  for (const [id, model] of Object.entries(models)) {
+    const rate = rates.get(bareModelID(id)) ?? 0
+    out[id] = rate > 0 ? { ...model, rate } : model
+  }
+  return out
 }
 
 // signatureCache keeps the signature per signing secret. The signed text is a
@@ -486,6 +562,24 @@ export const MonkeyCodeAuthPlugin = async () => {
       }
     },
 
+    provider: {
+      id: PROVIDER_ID,
+      // Ask the console what each model costs and hand magpie the credit rate
+      // so it shows a badge by the model. Without a console cookie (or when
+      // the console prices a model nothing) the list comes back as it was, so
+      // magpie shows no badge rather than a made-up one.
+      async models(provider, { auth } = {}) {
+        try {
+          const cred = credentialOf(auth)
+          const rates = await ratesFor(cred.cookie)
+          if (!rates.size) return provider.models
+          return withRates(provider.models ?? {}, rates)
+        } catch {
+          return provider.models
+        }
+      },
+    },
+
     auth: {
       provider: PROVIDER_ID,
       single: true,
@@ -662,6 +756,10 @@ export const _internal = {
   labelOf,
   modelEntry,
   modelsConfig,
+  fetchRates,
+  ratesFor,
+  withRates,
+  RATE_BASE,
   signatureOf,
   credentialOf,
   normalizeCookie,

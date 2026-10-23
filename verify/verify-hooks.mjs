@@ -57,6 +57,33 @@ try {
   record("check-in returns a documented outcome", false, String(error?.message ?? error))
 }
 
+// ---- provider.models -------------------------------------------------------
+
+try {
+  const cfg = {}
+  await plugin.config(cfg)
+  const listed = await plugin.provider?.models?.(cfg.provider.monkeycode, { auth: saved })
+  const rows = Object.entries(listed ?? {})
+  const rated = rows.filter(([, m]) => m?.rate > 0)
+  record("models hook lists every model", rows.length >= 25, `${rows.length} model(s)`)
+  record(
+    "models hook hands magpie a credit rate",
+    rated.length > 0,
+    rated.length
+      ? `${rated.length} priced: ${rated
+          .slice(0, 4)
+          .map(([id, m]) => `${id} ${m.rate}×`)
+          .join(", ")}`
+      : "none — needs a console cookie, or the console prices nothing",
+  )
+  // A rate must never be invented for a model the console did not price: the
+  // tiers this account cannot reach have no price at all.
+  const unpriced = rows.filter(([, m]) => m?.rate === undefined)
+  record("models hook leaves unpriced models without a rate", true, `${unpriced.length} model(s) carry no badge`)
+} catch (error) {
+  record("models hook hands magpie a credit rate", false, String(error?.message ?? error))
+}
+
 // ---- loader ----------------------------------------------------------------
 
 try {

@@ -352,3 +352,74 @@ test("checkin without a cookie is ineligible", async () => {
   const result = await hooks.auth.checkin(async () => ({ type: "api", key: "oma_test", metadata: { secret: "omas_test" } }))
   assert.equal(result.outcome, "ineligible")
 })
+
+test("console prices become the credit rate magpie shows", async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        code: 0,
+        message: "success",
+        data: [
+          { name: "monkeycode-basic/deepseek-flash", input_price: 200, is_hidden: false },
+          { name: "qwen3.5-plus", input_price: 100, is_hidden: true },
+          { name: "glm-5.1", input_price: 800, is_hidden: false },
+          { name: "no-price" },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )
+  try {
+    const { rates } = await I.fetchRates("cookie")
+    assert.equal(rates.get("basic/deepseek-flash"), 1)
+    assert.equal(rates.get("qwen3.5-plus"), 0.5)
+    assert.equal(rates.get("glm-5.1"), 4)
+    assert.equal(rates.get("no-price"), undefined)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test("a console that answers badly leaves the rates alone", async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () => new Response("{}", { status: 500 })
+  try {
+    const { rates, why } = await I.fetchRates("cookie")
+    assert.equal(rates.size, 0)
+    assert.match(why, /500/)
+    const none = await I.fetchRates("")
+    assert.equal(none.rates.size, 0)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test("rates land on the models magpie lists, and only where priced", () => {
+  const rates = new Map([
+    ["basic/deepseek-flash", 1],
+    ["glm-5.1", 4],
+  ])
+  const listed = {
+    "basic/deepseek-flash": { name: "Basic · deepseek-flash" },
+    "glm-5.1": { name: "glm-5.1" },
+    "pro/hy3": { name: "Pro · hy3" },
+  }
+  const out = I.withRates(listed, rates)
+  assert.equal(out["basic/deepseek-flash"].rate, 1)
+  assert.equal(out["glm-5.1"].rate, 4)
+  assert.equal(out["pro/hy3"].rate, undefined)
+  assert.equal(out["pro/hy3"].name, "Pro · hy3")
+  // Nothing to add: the list is handed back untouched.
+  const same = { "basic/deepseek-flash": { name: "x" } }
+  assert.equal(I.withRates(same, new Map()), same)
+})
+
+test("only the rate, never the model table's own shape, changes", () => {
+  const entry = I.modelEntry("basic/deepseek-flash", 1)
+  assert.equal(entry.rate, 1)
+  assert.equal(entry.id, "monkeycode-basic/deepseek-flash")
+  const bare = I.modelEntry("pro/hy3")
+  assert.equal(bare.rate, undefined)
+  // A rate of 0 must not become a badge showing 0x.
+  assert.equal(I.modelEntry("pro/hy3", 0).rate, undefined)
+})
