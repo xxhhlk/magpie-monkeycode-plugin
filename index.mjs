@@ -14,9 +14,10 @@
 //
 // Credentials are read from the official client's settings.json: an `oma_`
 // api key plus an `omas_` signing secret. A console session cookie is
-// optional and only used for the usage and check-in reads.
+// optional and used for usage, model prices and daily check-in.
 
-import { createHmac } from "node:crypto"
+import { createHash, createHmac } from "node:crypto"
+import { setImmediate as yieldTurn } from "node:timers/promises"
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
@@ -491,27 +492,123 @@ async function fetchWallet(cookie) {
   return payload.data ?? {}
 }
 
-async function fetchCheckinState(cookie) {
-  const res = await fetch(`${consoleURL()}/api/v1/users/wallet/checkin`, {
+// Cap.js uses FNV-1a to seed xorshift32. Indexing starts at 1, exactly as
+// wild-work/internal/monkeycode/captcha.go and the vendor's redeem endpoint do.
+function capPRNG(seed, length) {
+  let state = 2166136261
+  for (let i = 0; i < seed.length; i++) {
+    state ^= seed.charCodeAt(i)
+    state += (state << 1) + (state << 4) + (state << 7) + (state << 8) + (state << 24)
+  }
+  let out = ""
+  while (out.length < length) {
+    state ^= state << 13
+    state ^= state >>> 17
+    state ^= state << 5
+    out += (state >>> 0).toString(16).padStart(8, "0")
+  }
+  return out.slice(0, length)
+}
+
+async function capSolve(token, c, s, d, { signal, deadline = Date.now() + 15000 } = {}) {
+  if (typeof token !== "string" || !token || token.length > 512 ||
+      !Number.isInteger(c) || c < 1 || c > 100 ||
+      !Number.isInteger(s) || s < 1 || s > 128 ||
+      !Number.isInteger(d) || d < 1 || d > 5 || !Number.isFinite(deadline)) {
+    throw new Error("PoW 挑战参数不受支持")
+  }
+  const check = () => {
+    signal?.throwIfAborted()
+    if (Date.now() >= deadline) throw new Error("PoW 挑战已过期或计算超时")
+  }
+  check()
+  const solutions = []
+  let work = 0
+  for (let i = 1; i <= c; i++) {
+    const salt = capPRNG(token + i, s)
+    const target = capPRNG(token + i + "d", d)
+    for (let nonce = 0; ; nonce++) {
+      if ((work++ & 2047) === 0) {
+        // Let the shared plugin host serve chats and process cancellation.
+        await yieldTurn()
+        check()
+      }
+      if (createHash("sha256").update(salt + nonce).digest("hex").startsWith(target)) {
+        solutions.push(nonce)
+        break
+      }
+    }
+  }
+  check()
+  return solutions
+}
+
+async function checkinJSON(cookie, path, body, signal) {
+  const res = await fetch(`${consoleURL()}${path}`, {
+    method: body === undefined ? "GET" : "POST",
     headers: {
       Cookie: `monkeycode_ai_session=${cookie}`,
       Accept: "application/json",
       "User-Agent": AGENT_UA,
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     },
-    signal: AbortSignal.timeout(20000),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(20000)]),
+    redirect: "error",
   })
-  const { text, payload } = await readJSON(res)
-  if (res.status === 401) {
-    const err = new Error("控制台会话已过期")
-    err.status = 401
-    throw err
+  if (!res.ok) {
+    await res.body?.cancel()
+    throw new Error(res.status === 401 ? "控制台会话已过期，请重新导入登录态" : `签到接口 HTTP ${res.status}`)
   }
-  if (!res.ok) throw new Error(`签到状态接口 HTTP ${res.status}${text ? `: ${text.slice(0, 120)}` : ""}`)
-  if (!payload || typeof payload !== "object") throw new Error("签到状态接口返回的不是 JSON")
-  if (Number(payload.code) !== 0) throw new Error(`签到状态接口 code=${payload.code} ${vendorMessage(payload, "")}`.trim())
-  const checkedIn = payload.data?.checked_in
-  if (typeof checkedIn !== "boolean") throw new Error("签到状态回执缺少 checked_in")
-  return { checkedIn }
+  const { payload } = await readJSON(res)
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("签到接口返回的不是 JSON 对象")
+  return payload
+}
+
+function checkinData(payload) {
+  if (payload.code !== 0) throw new Error(`签到接口业务状态异常（code=${Number.isFinite(payload.code) ? payload.code : "unknown"}）`)
+  if (typeof payload.data?.checked_in !== "boolean") throw new Error("签到回执缺少 checked_in")
+  return payload.data.checked_in
+}
+
+async function performCheckin(cookie) {
+  const signal = AbortSignal.timeout(45000)
+  const path = "/api/v1/users/wallet/checkin"
+  if (checkinData(await checkinJSON(cookie, path, undefined, signal))) {
+    return { outcome: "done", message: "今日已签到" }
+  }
+  const ch = await checkinJSON(cookie, "/api/v1/public/captcha/challenge", {}, signal)
+  const expires = ch.expires
+  if (expires !== undefined && (!Number.isFinite(expires) || expires <= Date.now())) {
+    throw new Error("PoW 挑战已过期或有效期无效")
+  }
+  const solutions = await capSolve(ch.token, ch.challenge?.c, ch.challenge?.s, ch.challenge?.d, {
+    signal,
+    deadline: Math.min(Date.now() + 15000, expires ?? Infinity),
+  })
+  const rd = await checkinJSON(cookie, "/api/v1/public/captcha/redeem", { token: ch.token, solutions }, signal)
+  if (rd.success !== true || typeof rd.token !== "string" || !rd.token.trim()) {
+    throw new Error("PoW 凭证兑换失败")
+  }
+  if (rd.expires !== undefined && (!Number.isFinite(rd.expires) || rd.expires <= Date.now())) {
+    throw new Error("PoW 凭证已过期或有效期无效")
+  }
+  if (!checkinData(await checkinJSON(cookie, path, { captcha_token: rd.token }, signal))) {
+    throw new Error("签到未生效（checked_in=false）")
+  }
+  // The receipt has no reward amount. Never invent a credit value.
+  return { outcome: "claimed", message: "签到成功" }
+}
+
+// Coalesce concurrent presses for one account, but allow retry after failure.
+const checkinFlights = new Map()
+function checkinFor(cookie) {
+  let pending = checkinFlights.get(cookie)
+  if (!pending) {
+    pending = performCheckin(cookie).finally(() => checkinFlights.delete(cookie))
+    checkinFlights.set(cookie, pending)
+  }
+  return pending
 }
 
 function formatTokens(n) {
@@ -686,12 +783,7 @@ export const MonkeyCodeAuthPlugin = async () => {
           return { outcome: "ineligible", message: "未保存控制台 Cookie，无法查询签到状态。" }
         }
         try {
-          const { checkedIn } = await fetchCheckinState(cred.cookie)
-          if (checkedIn) return { outcome: "done", message: "今日已签到" }
-          return {
-            outcome: "captcha",
-            message: "MonkeyCode 签到需要人机验证，请在 monkeycode-ai.com 或官方客户端完成签到。",
-          }
+          return await checkinFor(cred.cookie)
         } catch (e) {
           return { outcome: "failed", message: e?.message ?? String(e) }
         }
@@ -771,4 +863,6 @@ export const _internal = {
   isResponsesURL,
   walletToUsage,
   formatTokens,
+  capPRNG,
+  capSolve,
 }

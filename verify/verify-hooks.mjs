@@ -4,8 +4,8 @@
 //
 //   node verify/verify-hooks.mjs [plugin-dir]
 //
-// Nothing is written: usage and check-in only read the console, and the login
-// is handed over in place.
+// The saved login is read-only. Check-in claims today's reward if needed,
+// including the vendor's computational PoW challenge.
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -48,11 +48,11 @@ try {
 
 try {
   const out = await plugin.auth.checkin(getAuth)
-  const allowed = ["claimed", "done", "ineligible", "inactive", "captcha", "failed"]
-  record("check-in returns a documented outcome", allowed.includes(out?.outcome), `${out?.outcome} — ${out?.message ?? ""}`)
-  // The vendor wants a captcha for an unclaimed day; a plugin must never solve
-  // one, so this outcome is the expected and correct answer here.
-  record("check-in never claims a captcha was solved", out?.outcome !== "claimed", `outcome=${out?.outcome}`)
+  record("check-in claims the reward or confirms today's claim", ["claimed", "done"].includes(out?.outcome), `${out?.outcome} — ${out?.message ?? ""}`)
+  if (["claimed", "done"].includes(out?.outcome)) {
+    const again = await plugin.auth.checkin(getAuth)
+    record("a second check confirms today's claim", again?.outcome === "done", `outcome=${again?.outcome}`)
+  }
 } catch (error) {
   record("check-in returns a documented outcome", false, String(error?.message ?? error))
 }

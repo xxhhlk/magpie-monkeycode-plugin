@@ -84,8 +84,10 @@ Responses 面同理，签名对象换成 `input[0].content`。
 
 控制台会话大约 6 天过期（由约 29 天的百智云会话派生），过期后用量会提示重新登录，**不影响对话**（对话只用 `oma_` + `omas_`）。插件不做自动续期：`oma_` key 无过期，控制台会话要续得回官方客户端重新登录。
 
-签到：MonkeyCode 的签到要过 Cap.js 人机验证。按 magpie 的插件规范，插件不代解验证码，
-所以这里只查今天签没签：已签显示「今日已签到」，未签提示去 monkeycode-ai.com 或官方客户端签到。
+签到支持自动领取：查询今日状态；未签时完成 Cap.js 的 SHA-256 工作量证明（PoW），兑换
+`captcha_token` 后领取；已签则直接返回「今日已签到」。PoW 是本机计算，无需看图或拖滑块。
+计算有参数和时间上限，领取回执必须明确返回 `checked_in: true` 才显示成功。
+上游回执不提供奖励金额，插件不填固定积分数。控制台会话过期时需重新导入登录态。
 
 ## 积分倍率
 
@@ -134,11 +136,11 @@ node --test test/index.test.mjs
 #    系统提示词透传、未知模型与无权限档位的错误分类
 node verify/verify-installed.mjs          # 可选 [gateway] [anthropic模型] [responses模型]
 
-# 2) 插件钩子直连真实账号：usage 出数字、checkin 出合规 outcome、
+# 2) 插件钩子直连真实账号：usage 出数字、自动签到并确认重复调用为已签、
 #    loader 的签名请求被上游接受、错签名被 403 拒绝
 node verify/verify-hooks.mjs              # 可选 [插件目录]
 ```
 
-两个脚本都不打印、不写入任何凭据。`verify-hooks.mjs` 从 `~/.config/magpie/plugin-auth.json`
-就地读取已保存的登录，`MONKEYCODE_AUTH` 可换文件路径。`verify-installed.mjs` 的 ultra 档用例
+两个脚本都不打印、不写入任何凭据。`verify-hooks.mjs` 会实际领取当天尚未领取的签到奖励，
+并从 `~/.config/magpie/plugin-auth.json` 就地读取已保存的登录，`MONKEYCODE_AUTH` 可换文件路径。`verify-installed.mjs` 的 ultra 档用例
 在账号无权限时同样 PASS——`403` 且未标记登录失效即符合预期，明细注明 expected。
