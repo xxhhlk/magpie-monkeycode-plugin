@@ -618,6 +618,16 @@ function formatTokens(n) {
   return String(v)
 }
 
+// The daily token window resets at 00:00 Beijing time. Magpie only counts a
+// window used up when it knows when the window renews, so a window that says
+// how long it runs but not when it started never stops the account.
+function beijingMidnight(now = Date.now()) {
+  const OFFSET = 8 * 3600 * 1000
+  const bj = new Date(now + OFFSET)
+  const midnight = Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate() + 1)
+  return midnight - OFFSET
+}
+
 function walletToUsage(data) {
   const milli = Number(data?.balance) || 0
   const credits = milli > 0 ? Math.ceil(milli / 1000) : 0
@@ -634,6 +644,7 @@ function walletToUsage(data) {
       limit,
       unit: "tokens",
       span: 86400,
+      resetsAt: beijingMidnight(),
     })
   }
   return {
