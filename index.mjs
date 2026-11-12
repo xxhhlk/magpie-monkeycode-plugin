@@ -628,15 +628,26 @@ function beijingMidnight(now = Date.now()) {
   return midnight - OFFSET
 }
 
+// The console stops reporting the day's ceiling once the free tokens are
+// gone: it answers `daily_token_limit: 0` with `daily_token_balance: 0`.
+// Dropping the window then leaves magpie an account with no windows at all,
+// which a routing strategy can read as a free model. Keep the last ceiling
+// this process saw and report the window as spent until the next Beijing
+// midnight. The fallback is the ceiling the wallet reported before it began
+// answering 0; it is only used when the process has seen no ceiling yet.
+let lastDailyLimit = 0
+const FALLBACK_DAILY_LIMIT = 10_000_000
+
 function walletToUsage(data) {
   const milli = Number(data?.balance) || 0
   const credits = milli > 0 ? Math.ceil(milli / 1000) : 0
-  const limit = Number(data?.daily_token_limit) || 0
+  const reported = Number(data?.daily_token_limit) || 0
   const remain = Number(data?.daily_token_balance) || 0
-  const used = Math.max(0, limit - remain)
-  const windows = []
-  if (limit > 0) {
-    windows.push({
+  if (reported > 0) lastDailyLimit = reported
+  const limit = reported > 0 ? reported : lastDailyLimit > 0 ? lastDailyLimit : FALLBACK_DAILY_LIMIT
+  const used = Math.max(0, Math.min(limit, limit - remain))
+  const windows = [
+    {
       name: "每日 Token 额度",
       used: (used / limit) * 100,
       display: `${formatTokens(used)} / ${formatTokens(limit)} tokens`,
@@ -645,8 +656,8 @@ function walletToUsage(data) {
       unit: "tokens",
       span: 86400,
       resetsAt: beijingMidnight(),
-    })
-  }
+    },
+  ]
   return {
     plan: PROVIDER_NAME,
     balance: `${credits} 积分`,

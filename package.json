@@ -1,6 +1,6 @@
 {
   "name": "opencode-monkeycode-auth",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "OpenCode & Magpie provider plugin for MonkeyCode (monkeycode-ai.com)",
   "type": "module",
   "main": "./index.mjs",
